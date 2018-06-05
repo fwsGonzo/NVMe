@@ -1,0 +1,8 @@
+{
+  "drives" : [{"file" : "../disk.img",
+               "type" : "nvme",
+               "format": "raw",
+               "media": "disk" }],
+  "net": [],
+  "mem": 64
+}
