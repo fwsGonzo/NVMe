@@ -23,15 +23,68 @@
 #define REG_INTMC  0x10
 #define REG_CTLCFG 0x14
 #define REG_CTLSTA 0x1C
+#define REG_NVMSSR 0x20
+
+#define REG_AQ_CFG      0x24
+#define REG_AQ_SUBM_BA  0x28
+#define REG_AQ_COMP_BA  0x30
 
 #define REG_COMPQ_HEAD  0x1000
 #define REG_SUBMQ_TAIL  0x1000
 
+#define CFG_EN   0x1
+
+#define NVME_CMD_IDENTIFY      0x06
+#define NVME_CMD_ABORT         0x08
+#define NVME_CMD_SET_FEATURES  0x09
+#define NVME_CMD_GET_FEATURES  0x0A
+
+#define SGL_TYPE_DEFAULT  0x0
+
+struct sgl_data_block_desc
+{
+  uint64_t addr   = 0x0;
+  uint32_t length = 0;
+  uint8_t  padding[3] = {0};
+  uint8_t  type = SGL_TYPE_DEFAULT;
+};
+
+struct nvme_io_subm_entry
+{
+  uint8_t  opcode  = 0;
+  uint8_t  options = 0; /* No FUSE, PRP */
+  uint16_t command = 0;
+  uint32_t nsid    = 0;
+  uint64_t resv0   = 0;
+  uint64_t MPTR = 0x0;
+  uint64_t prp1 = 0x0;
+  uint64_t prp2 = 0x0;
+  uint32_t dw10;
+  uint32_t dw11;
+  uint32_t dw12;
+  uint32_t dw13;
+  uint32_t dw14;
+  uint32_t dw15;
+};
+static_assert(sizeof(nvme_io_subm_entry) == 64, "I/O submission entry must be 64 bytes");
+
+struct nvme_io_comp_entry
+{
+  uint32_t command;
+  uint32_t resv;
+  uint16_t sq_id;
+  uint16_t sq_head;
+  uint16_t status;
+  uint16_t id;
+} __attribute__((packed));
+static_assert(sizeof(nvme_io_comp_entry) == 16, "I/O submission entry must be 16 bytes");
+
+#define ADMIN_IO_SUBM_Q 0
+#define ADMIN_IO_COMP_Q 0
+
 inline uint32_t reg_doorbell_compq_head(int y, const int stride) {
   return REG_COMPQ_HEAD + ((2*y + 1) * (4 << stride));
 }
-inline uint32_t reg_doorbell_compq_tail(int y, const int stride) {
+inline uint32_t reg_doorbell_submq_tail(int y, const int stride) {
   return REG_SUBMQ_TAIL + ((2*y + 0) * (4 << stride));
 }
-
-#define CFG_EN   0x1

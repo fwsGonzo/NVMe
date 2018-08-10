@@ -24,6 +24,8 @@
 #include <hw/pci_device.hpp>
 #include <deque>
 
+struct nvme_io_subm_entry;
+
 class NVMe : public hw::Block_device
 {
 public:
@@ -74,9 +76,20 @@ public:
   NVMe(hw::PCI_Device& pcidev);
 
 private:
+  static const int SUBM_Q_SIZE = 16;
+  static const int COMP_Q_SIZE = 16;
+
+  struct queue_t {
+    void*    data = nullptr;
+    uint16_t no;
+    uint16_t size;
+    uint16_t index = 0;
+  };
+
   void check_version();
   void msix_cmd_handler();
   void msix_comp_handler();
+  void submit(queue_t&, const nvme_io_subm_entry&);
 
   inline uint32_t read32(uint32_t off) noexcept;
   inline uint64_t read64(uint32_t off) noexcept;
@@ -87,6 +100,9 @@ private:
 
   uintptr_t m_ctl = 0;
   uint32_t  m_dbstride;
+
+  queue_t m_adm_sq;
+  queue_t m_adm_cq;
 
   // stat counters
   uint32_t* m_errors   = nullptr;
