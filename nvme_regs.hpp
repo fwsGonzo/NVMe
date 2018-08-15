@@ -25,14 +25,15 @@
 #define REG_CTLSTA 0x1C
 #define REG_NVMSSR 0x20
 
+#define CFG_EN   0x1
+
+#define ADMIN_Q         0
 #define REG_AQ_CFG      0x24
 #define REG_AQ_SUBM_BA  0x28
 #define REG_AQ_COMP_BA  0x30
 
 #define REG_COMPQ_HEAD  0x1000
 #define REG_SUBMQ_TAIL  0x1000
-
-#define CFG_EN   0x1
 
 #define NVME_CMD_IDENTIFY      0x06
 #define NVME_CMD_ABORT         0x08
@@ -65,7 +66,7 @@ struct nvme_io_subm_entry
   uint32_t dw13;
   uint32_t dw14;
   uint32_t dw15;
-};
+} __attribute__((packed));
 static_assert(sizeof(nvme_io_subm_entry) == 64, "I/O submission entry must be 64 bytes");
 
 struct nvme_io_comp_entry
@@ -74,13 +75,27 @@ struct nvme_io_comp_entry
   uint32_t resv;
   uint16_t sq_id;
   uint16_t sq_head;
-  uint16_t status;
-  uint16_t id;
+  uint32_t dw3;
+
+  uint16_t phase_tag() const noexcept {
+    return (dw3 >> 16) & 0x1;
+  }
+  uint16_t status_field() const noexcept {
+    return dw3 >> 17;
+  }
+  uint16_t status_code() const noexcept {
+    return status_field() & 0xFF;
+  }
+  uint16_t cid() const noexcept {
+    return dw3 & 0xFFFF;
+  }
+
+  bool good() const noexcept {
+    return status_code() == 0;
+  }
+
 } __attribute__((packed));
 static_assert(sizeof(nvme_io_comp_entry) == 16, "I/O submission entry must be 16 bytes");
-
-#define ADMIN_IO_SUBM_Q 0
-#define ADMIN_IO_COMP_Q 0
 
 inline uint32_t reg_doorbell_compq_head(int y, const int stride) {
   return REG_COMPQ_HEAD + ((2*y + 1) * (4 << stride));

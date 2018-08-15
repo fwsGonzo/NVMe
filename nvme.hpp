@@ -79,16 +79,26 @@ private:
   static const int SUBM_Q_SIZE = 16;
   static const int COMP_Q_SIZE = 16;
 
-  struct queue_t {
+  struct queue_ring_t {
     void*    data = nullptr;
     uint16_t no;
     uint16_t size;
     uint16_t index = 0;
+    uint16_t current_phase = 0x1;
+  };
+  struct queue_t
+  {
+    queue_t(uint16_t subm_size, uint16_t comp_size);
+    queue_t() {}
+    queue_ring_t subm;
+    queue_ring_t comp;
+    std::deque<void*> jobs;
   };
 
   void check_version();
-  void msix_cmd_handler();
-  void msix_comp_handler();
+  void msix_aq_comp_handler();
+  void msix_ioq_comp_handler();
+  void aq_identify(uint32_t cns);
   void submit(queue_t&, const nvme_io_subm_entry&);
 
   inline uint32_t read32(uint32_t off) noexcept;
@@ -100,9 +110,7 @@ private:
 
   uintptr_t m_ctl = 0;
   uint32_t  m_dbstride;
-
-  queue_t m_adm_sq;
-  queue_t m_adm_cq;
+  queue_t m_aq;
 
   // stat counters
   uint32_t* m_errors   = nullptr;
