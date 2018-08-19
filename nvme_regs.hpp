@@ -35,10 +35,14 @@
 #define REG_COMPQ_HEAD  0x1000
 #define REG_SUBMQ_TAIL  0x1000
 
-#define NVME_CMD_IDENTIFY      0x06
+#define NVME_CMD_CREATE_SQ     0x01
+#define NVME_CMD_GET_LOG_PAGE  0x02
+#define NVME_CMD_CREATE_CQ     0x05
 #define NVME_CMD_ABORT         0x08
+#define NVME_CMD_IDENTIFY      0x06
 #define NVME_CMD_SET_FEATURES  0x09
 #define NVME_CMD_GET_FEATURES  0x0A
+#define NVME_CMD_DEV_SELF_TEST 0x14
 
 #define SGL_TYPE_DEFAULT  0x0
 
@@ -73,8 +77,8 @@ struct nvme_io_comp_entry
 {
   uint32_t command;
   uint32_t resv;
-  uint16_t sq_id;
   uint16_t sq_head;
+  uint16_t sq_id;
   uint32_t dw3;
 
   uint16_t phase_tag() const noexcept {
@@ -103,3 +107,38 @@ inline uint32_t reg_doorbell_compq_head(int y, const int stride) {
 inline uint32_t reg_doorbell_submq_tail(int y, const int stride) {
   return REG_SUBMQ_TAIL + ((2*y + 0) * (4 << stride));
 }
+
+struct identify_lba_format_data {
+  uint16_t MS;
+  uint8_t  LBADS;
+  unsigned RP : 2;
+  unsigned Reserved0 : 6;
+};
+
+struct identify_namespace_data {
+  uint64_t NSZE;
+  uint64_t NCAP;
+  uint64_t NUSE;
+  uint8_t  NSFEAT;
+  uint8_t  NLBAF;
+  uint8_t  FLBAS;
+  uint8_t  MC;
+  uint8_t  DPC;
+  uint8_t  DPS;
+  uint8_t  NMIC;
+  uint8_t  RESCAP;
+  uint8_t  FPI;
+  uint8_t  DLFEAT;
+  uint16_t NAWUN;
+  uint16_t NAWUPF;
+  uint16_t NACWU;
+  uint16_t NABSN;
+  uint16_t NABO;
+  uint16_t NABSPF;
+  uint16_t NOIOB;
+  uint8_t  NVMCAP[16];
+  uint8_t  Reserved0[40];
+  uint8_t  NGUID[16];
+  uint64_t EUI64;
+  identify_lba_format_data LBAF[16];
+};

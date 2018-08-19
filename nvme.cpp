@@ -26,6 +26,10 @@
 
 #define NVME_RESET_VALUE  0x4E564D65 /* "NVMe" */
 
+NVMe::queue_reference comp_ref(nvme_io_comp_entry& entry) {
+  return (entry.sq_id << 16) | entry.sq_head;
+}
+
 NVMe::NVMe(hw::PCI_Device& dev)
   : m_pcidev(dev)
 {
@@ -74,7 +78,7 @@ NVMe::NVMe(hw::PCI_Device& dev)
       COMP_Q_SIZE << 16 |
       SUBM_Q_SIZE << 0  );
 
-  new (&m_aq) queue_t(SUBM_Q_SIZE, COMP_Q_SIZE);
+  new (&m_aq) queue_t(this, SUBM_Q_SIZE, COMP_Q_SIZE);
   write64(REG_AQ_SUBM_BA, (uint64_t) m_aq.subm.data);
   write64(REG_AQ_COMP_BA, (uint64_t) m_aq.comp.data);
 
@@ -100,7 +104,8 @@ NVMe::NVMe(hw::PCI_Device& dev)
 
   write32(reg_doorbell_compq_head(ADMIN_Q, m_dbstride), 0);
   // identify
-  this->aq_identify(0x0); // CNS 0x0 => Identify namespace
+  m_aq.identify(0x0); // CNS 0x0 => Identify namespace
+  m_aq.identify(0x0); // CNS 0x0 => Identify namespace
 
   INFO("NVMe", "Block device with %zu sectors capacity", 0ul);
 }
@@ -130,16 +135,29 @@ void NVMe::msix_aq_comp_handler()
     printf("--> SQ ID %#x SQ HEAD %#x\n", entry.sq_id, entry.sq_head);
     // process item
     assert(entry.status_code() == 0);
+    m_aq.handle_cmd(entry);
 
     q.index++;
-    if (q.index % q.size == 0) q.current_phase = 1 - q.current_phase;
+    if (q.index == 0) q.current_phase = 1 - q.current_phase;
   }
-
 }
 void NVMe::msix_ioq_comp_handler()
 {
   printf("NVMe::msix_ioq_comp_handler()\n");
 
+}
+void NVMe::queue_t::handle_cmd(nvme_io_comp_entry& entry)
+{
+  auto it = this->async_results.find(comp_ref(entry));
+  assert(it != this->async_results.end());
+  auto data = it->second;
+  this->async_results.erase(it);
+  printf("Data ready: %p, %p\n", data.data1, data.data2);
+
+  auto* d = (identify_namespace_data*) data.data1;
+  printf("N SZ E: %#lx\n", d->NSZE);
+  printf("N CAP:  %#lx\n", d->NCAP);
+  printf("N USE:  %#lx\n", d->NUSE);
 }
 
 void NVMe::read(block_t blk, on_read_func func)
@@ -154,18 +172,6 @@ void NVMe::read(block_t blk, size_t cnt, on_read_func func)
 void NVMe::deactivate()
 {
   /// TODO: reset device
-}
-
-void NVMe::aq_identify(uint32_t cns)
-{
-  nvme_io_subm_entry idtfy;
-  idtfy.opcode  = NVME_CMD_IDENTIFY;
-  idtfy.command = 0;
-  idtfy.nsid    = 0x1;
-  idtfy.prp1    = (uint64_t) std::aligned_alloc(4096, 4096);
-  idtfy.dw10    = cns;
-  printf("Identify command with PRP=%#lx...\n", idtfy.prp1);
-  this->submit(m_aq, idtfy);
 }
 
 uint32_t NVMe::read32(const uint32_t off) noexcept
@@ -189,18 +195,8 @@ void NVMe::write64(const uint32_t off, const uint64_t val) noexcept
   *(volatile uint64_t*) (this->m_ctl + off) = val;
 }
 
-void NVMe::submit(queue_t& nvmq, const nvme_io_subm_entry& cmd)
-{
-  auto& q = nvmq.subm;
-  // write entry to queue area
-  *(nvme_io_subm_entry*) ((char*) q.data + q.index * (4 << m_dbstride)) = cmd;
-
-  // update tail pointer
-  q.index = (q.index + 1) % SUBM_Q_SIZE;
-  write32(reg_doorbell_submq_tail(q.no, m_dbstride), q.index);
-}
-
-NVMe::queue_t::queue_t(const uint16_t SUBM_SIZE, const uint16_t COMP_SIZE)
+NVMe::queue_t::queue_t(NVMe* ctrl, const uint16_t SUBM_SIZE, const uint16_t COMP_SIZE)
+  : controller(ctrl)
 {
   subm.data = std::aligned_alloc(4096, sizeof(nvme_io_subm_entry) * SUBM_SIZE);
   memset(subm.data, 0, sizeof(nvme_io_subm_entry) * SUBM_SIZE);
@@ -210,6 +206,51 @@ NVMe::queue_t::queue_t(const uint16_t SUBM_SIZE, const uint16_t COMP_SIZE)
   memset(comp.data, 0, sizeof(nvme_io_comp_entry) * COMP_SIZE);
   comp.no   = 0;
   comp.size = COMP_SIZE;
+}
+
+void NVMe::queue_t::identify(const uint32_t cns)
+{
+  void* prp1 = std::aligned_alloc(4096, 4096);
+  async_results.emplace(
+    self_reference(),
+    async_result{prp1, nullptr});
+
+  nvme_io_subm_entry idtfy;
+  idtfy.opcode  = NVME_CMD_IDENTIFY;
+  idtfy.command = 0;
+  idtfy.nsid    = 0x1;
+  idtfy.prp1    = (uint64_t) prp1;
+  idtfy.dw10    = cns;
+  printf("Identify command with PRP=%#lx...\n", idtfy.prp1);
+  this->submit(idtfy);
+}
+
+void NVMe::queue_t::create_ioq()
+{
+  nvme_io_subm_entry entry;
+  entry.opcode  = NVME_CMD_CREATE_CQ;
+  entry.command = 0;
+  entry.nsid    = 0x1;
+  entry.prp1    = 0;
+  entry.dw10    = 0;
+  printf("Create I/O queue with Q1=%p Q2=%p\n", nullptr, nullptr);
+  this->submit(entry);
+}
+
+void NVMe::queue_t::submit(const nvme_io_subm_entry& cmd)
+{
+  auto& q = this->subm;
+  // write entry to queue area
+  *(nvme_io_subm_entry*) ((char*) q.data + q.index * (4 << controller->m_dbstride)) = cmd;
+
+  // update tail pointer
+  q.index = (q.index + 1) % q.size;
+  controller->write32(reg_doorbell_submq_tail(q.no, controller->m_dbstride), q.index);
+}
+
+NVMe::queue_reference NVMe::queue_t::self_reference() const noexcept
+{
+  return (this->subm.no << 16) | this->subm.index;
 }
 
 #include <kernel/pci_manager.hpp>

@@ -23,8 +23,10 @@
 #include <hw/block_device.hpp>
 #include <hw/pci_device.hpp>
 #include <deque>
+#include <map>
 
 struct nvme_io_subm_entry;
+struct nvme_io_comp_entry;
 
 class NVMe : public hw::Block_device
 {
@@ -75,11 +77,17 @@ public:
 
   NVMe(hw::PCI_Device& pcidev);
 
+  typedef uint32_t queue_reference;
 private:
   static const int SUBM_Q_SIZE = 16;
   static const int COMP_Q_SIZE = 16;
 
-  struct queue_ring_t {
+  struct async_result {
+    void* data1;
+    void* data2;
+  };
+
+  struct queue_ring {
     void*    data = nullptr;
     uint16_t no;
     uint16_t size;
@@ -88,18 +96,24 @@ private:
   };
   struct queue_t
   {
-    queue_t(uint16_t subm_size, uint16_t comp_size);
+    queue_t(NVMe*, uint16_t subm_size, uint16_t comp_size);
     queue_t() {}
-    queue_ring_t subm;
-    queue_ring_t comp;
-    std::deque<void*> jobs;
+
+    void identify(uint32_t cns);
+    void create_ioq();
+    void submit(const nvme_io_subm_entry&);
+    queue_reference self_reference() const noexcept;
+    void handle_cmd(nvme_io_comp_entry&);
+
+    NVMe* controller = nullptr;
+    queue_ring subm;
+    queue_ring comp;
+    std::map<queue_reference, async_result> async_results;
   };
 
   void check_version();
   void msix_aq_comp_handler();
   void msix_ioq_comp_handler();
-  void aq_identify(uint32_t cns);
-  void submit(queue_t&, const nvme_io_subm_entry&);
 
   inline uint32_t read32(uint32_t off) noexcept;
   inline uint64_t read64(uint32_t off) noexcept;
