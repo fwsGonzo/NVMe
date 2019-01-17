@@ -20,13 +20,13 @@
 #define NVM_EXPRESS_HPP
 
 #include <common>
-#include <hw/block_device.hpp>
+#include <hw/writable_blkdev.hpp>
 #include <hw/pci_device.hpp>
 #include <deque>
 #include <map>
 #include "nvme_regs.hpp"
 
-class NVMe : public hw::Block_device
+class NVMe : public hw::Writable_Block_device
 {
 public:
   static std::unique_ptr<Block_device> new_instance(hw::PCI_Device& d)
@@ -47,24 +47,13 @@ public:
   // returns number of blocks on disk
   block_t size() const noexcept override;
 
-  // read @blk from disk, call func with buffer when done
-  void read(block_t blk, on_read_func func) override;
-  // read @blk + @cnt from disk, call func with buffer when done
+  // read @blk + @cnt from disk, call @cb with buffer when done
   void read(block_t blk, size_t cnt, on_read_func cb) override;
+  buffer_t read_sync(block_t, size_t) override;
 
-  // unsupported sync reads
-  buffer_t read_sync(block_t) override {
-    return buffer_t();
-  }
-  buffer_t read_sync(block_t, size_t) override {
-    return buffer_t();
-  }
-
-  // not supported
-  void write(block_t, buffer_t, on_write_func callback) override {
-    callback(true);
-  }
-  bool write_sync(block_t, buffer_t) override { return true; };
+  // write starting at @blk from @buffer, call @callback when done
+  void write(block_t, buffer_t, on_write_func callback);
+  bool write_sync(block_t, buffer_t) override;
 
   void deactivate() override;
 

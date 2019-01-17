@@ -25,8 +25,8 @@
 #include "nvme_regs.hpp"
 
 #define NVME_RESET_VALUE  0x4E564D65 /* "NVMe" */
-static const int SUBM_Q_SIZE = 2;
-static const int COMP_Q_SIZE = 2;
+static const int SUBM_Q_SIZE = 16;
+static const int COMP_Q_SIZE = 16;
 
 NVMe::queue_reference comp_ref(nvme_io_comp_entry& entry) {
   return (entry.sq_id << 16) | entry.cmd_id;
@@ -149,10 +149,10 @@ void NVMe::setup_io_queues()
   auto res = this->m_aq.set_features(NVME_FEAT_NUM_QUEUES, qdata, nullptr);
   assert(res.good());
   // NOTE: res.result contains two DWs containing the final count
-  printf("Done setting features\n");
+  //printf("Done setting features\n");
   
   m_ioqs.emplace_back(*this, 1, SUBM_Q_SIZE, COMP_Q_SIZE);
-  printf("Done creating I/O queue\n");
+  //printf("Done creating I/O queue\n");
 }
 
 NVMe::block_t NVMe::block_size() const noexcept {
@@ -208,21 +208,51 @@ void NVMe::queue_t::handle_result(nvme_io_comp_entry& entry)
   }
 }
 
-void NVMe::read(block_t blk, on_read_func func)
-{
-  return this->read(blk, 1, std::move(func));
-}
 void NVMe::read(block_t blk, size_t cnt, on_read_func func)
 {
   async_result result {
     .mode = MODE_READ,
-    .buffer = fs::construct_buffer(block_size()),
+    .buffer = fs::construct_buffer(block_size() * cnt),
     .on_read = std::move(func)
   };
   auto& q = m_ioqs.at(0);
   auto cmd = q.read(m_aq.ns.at(0).nsid(), result.buffer->data(), blk, cnt);
   q.submit_async(cmd, std::move(result));
 }
+NVMe::buffer_t NVMe::read_sync(block_t blk, size_t cnt)
+{
+  auto buffer = fs::construct_buffer(block_size() * cnt);
+  auto& q = m_ioqs.at(0);
+  auto cmd = q.read(m_aq.ns.at(0).nsid(), buffer->data(), blk, cnt);
+  
+  auto res = q.submit_sync(cmd);
+  if (res.good()) return buffer;
+  return nullptr;
+}
+
+void NVMe::write(block_t blk, buffer_t buffer, on_write_func callback)
+{
+  async_result result {
+    .mode = MODE_WRITE,
+    .buffer = std::move(buffer),
+    .on_write = std::move(callback)
+  };
+  const size_t cnt = buffer->size() / block_size();
+  auto& q = m_ioqs.at(0);
+  auto cmd = q.write(m_aq.ns.at(0).nsid(), result.buffer->data(), blk, cnt);
+  
+  q.submit_async(cmd, std::move(result));
+}
+bool NVMe::write_sync(block_t blk, buffer_t buffer)
+{
+  const size_t cnt = buffer->size() / block_size();
+  auto& q = m_ioqs.at(0);
+  auto cmd = q.write(m_aq.ns.at(0).nsid(), buffer->data(), blk, cnt);
+  
+  auto res = q.submit_sync(cmd);
+  return !res.good();
+}
+
 
 void NVMe::deactivate()
 {
@@ -343,11 +373,10 @@ nvme_command NVMe::queue_t::read(uint32_t nsid, void* buffer, uint64_t lba, uint
 {
   nvme_command cmd;
   cmd.opcode = NVME_IO_READ;
-  cmd.flags  = 0;
   cmd.nsid   = nsid;
   cmd.rw.prp1   = (uint64_t) buffer;
-  cmd.rw.slba   = 0;
-  cmd.rw.length = 0;
+  cmd.rw.slba   = lba;
+  cmd.rw.length = blks-1;
   return cmd;
 }
 nvme_command NVMe::queue_t::write(uint32_t nsid, void* buffer, uint64_t lba, uint16_t blks)
@@ -355,6 +384,9 @@ nvme_command NVMe::queue_t::write(uint32_t nsid, void* buffer, uint64_t lba, uin
   nvme_command cmd;
   cmd.opcode = NVME_IO_WRITE;
   cmd.nsid   = nsid;
+  cmd.rw.prp1   = (uint64_t) buffer;
+  cmd.rw.slba   = lba;
+  cmd.rw.length = blks-1;
   return cmd;
 }
 

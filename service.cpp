@@ -35,11 +35,31 @@ void Service::start(const std::string&)
   CHECKSERT(!disk->empty(), "Disk not empty");
   CHECKSERT(disk->dev().size() == 1, "Disk has 1 sector");
   
-  for (int i = 0; i < 10; i++)
+  INFO2("|-> Sync reads");
+  int gucci = 0;
+  for (int i = 0; i < 1000; i++) {
+    auto buffer = disk->dev().read_sync(0, 1);
+    if (buffer != nullptr)
+    if (buffer->size() == device.block_size()) gucci ++;
+  }
+  CHECKSERT(gucci == 1000, "1000x read_sync() success");
+  
+  INFO2("|-> Async reads");
+  for (int i = 0; i < 32; i++)
   disk->dev().read(0,
     [&device] (auto buffer) {
-      CHECKSERT(buffer != nullptr, "Read success");
-      CHECKSERT(buffer->size() == device.block_size(), "Buffer correct size");
+      static int gucci = 0;
+      if (buffer != nullptr)
+      if (buffer->size() == device.block_size()) gucci ++;
+      assert(buffer != nullptr);
+      assert(buffer->size() == device.block_size());
+
+      if (gucci == 32)
+      {
+        INFO2("[x] 32x async read() success");
+        INFO2("SUCCESS");
+        OS::shutdown();
+      }
     });
 }
 
