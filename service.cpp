@@ -32,11 +32,15 @@ void Service::start(const std::string&)
   // assert that we have a disk
   CHECKSERT(disk, "Disk created");
   // if the disk is empty, we can't mount a filesystem
-  CHECKSERT(disk->empty(), "Disk is empty");
-
+  CHECKSERT(!disk->empty(), "Disk not empty");
+  CHECKSERT(disk->dev().size() == 1, "Disk has 1 sector");
   
-
-
+  for (int i = 0; i < 10; i++)
+  disk->dev().read(0,
+    [&device] (auto buffer) {
+      CHECKSERT(buffer != nullptr, "Read success");
+      CHECKSERT(buffer->size() == device.block_size(), "Buffer correct size");
+    });
 }
 
 static void list_partitions(decltype(disk) disk)

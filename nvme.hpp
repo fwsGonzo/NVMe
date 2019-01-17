@@ -24,17 +24,13 @@
 #include <hw/pci_device.hpp>
 #include <deque>
 #include <map>
-
-struct nvme_io_subm_entry;
-struct nvme_io_comp_entry;
+#include "nvme_regs.hpp"
 
 class NVMe : public hw::Block_device
 {
 public:
   static std::unique_ptr<Block_device> new_instance(hw::PCI_Device& d)
   { return std::make_unique<NVMe>(d); }
-
-  static constexpr size_t SECTOR_SIZE = 512;
 
   std::string device_name() const override {
     return "nvme" + std::to_string(id());
@@ -45,14 +41,11 @@ public:
     return "NVMe";
   }
 
-  // returns the optimal block size for this device
-  block_t block_size() const noexcept override {
-    return SECTOR_SIZE; // some multiple of sector size
-  }
+  // returns the optimal block size for this block device
+  block_t block_size() const noexcept override;
 
-  block_t size() const noexcept override {
-    return 0;
-  }
+  // returns number of blocks on disk
+  block_t size() const noexcept override;
 
   // read @blk from disk, call func with buffer when done
   void read(block_t blk, on_read_func func) override;
@@ -79,39 +72,75 @@ public:
 
   typedef uint32_t queue_reference;
 private:
-  static const int SUBM_Q_SIZE = 16;
-  static const int COMP_Q_SIZE = 16;
-
+  enum {
+    MODE_READ, MODE_WRITE
+  };
   struct async_result {
-    void* data1;
-    void* data2;
+    int      mode = MODE_WRITE;
+    buffer_t buffer;
+    on_read_func  on_read  = nullptr;
+    on_write_func on_write = nullptr;
   };
 
+  struct sync_result {
+    int      status = 0;
+    uint32_t result = 0;
+    bool good() const noexcept { return status == 0; }
+  };
+  struct queue_t;
+  struct namespace_t {
+    namespace_t(NVMe&, queue_t&, uint32_t nsid);
+    uint32_t nsid() const noexcept { return m_nsid; }
+    uint64_t block_size() const noexcept { return m_blk_size; }
+    uint64_t blocks() const noexcept { return m_blocks; }
+    
+  private:
+    NVMe&    m_dev;
+    uint32_t m_nsid;
+    uint64_t m_blk_size;
+    uint64_t m_blocks;
+  };
   struct queue_ring {
-    void*    data = nullptr;
-    uint16_t no;
-    uint16_t size;
-    uint16_t index = 0;
-    uint16_t current_phase = 0x1;
+    void*     m_data = nullptr;
+    uint16_t  no;
+    uint16_t  size;
+    uint16_t  index = 0; // head/tail
+    int16_t   current_phase = 0x1;
+    
+    nvme_command& command(uint16_t idx, const uint32_t stride);
+    nvme_io_comp_entry& comp_entry() noexcept;
+    void comp_advance_head(NVMe& dev);
+    void alloc(uint16_t, uint16_t size, size_t elem);
   };
   struct queue_t
   {
-    queue_t(NVMe*, uint16_t subm_size, uint16_t comp_size);
-    queue_t() {}
+    queue_t(NVMe& dev) : m_dev(dev) {}
+    queue_t(NVMe&, int no, uint16_t subm_size, uint16_t comp_size);
 
-    void identify(uint32_t cns);
-    void create_ioq();
-    void submit(const nvme_io_subm_entry&);
+    sync_result identify(uint32_t nsid, uint32_t cns, void* dma_addr);
+    sync_result set_features(uint32_t fid, uint32_t dw11, void* dma_addr);
+    sync_result create_ioq(uint32_t nsid);
+    nvme_command read(uint32_t nsid, void*, uint64_t lba, uint16_t blks);
+    nvme_command write(uint32_t nsid, void*, uint64_t lba, uint16_t blks);
+    void        identify_namespaces();
+    void        submit(nvme_command&);
+    void        submit_async(nvme_command&, async_result);
+    sync_result submit_sync(nvme_command&);
     queue_reference self_reference() const noexcept;
-    void handle_cmd(nvme_io_comp_entry&);
+    void handle_result(nvme_io_comp_entry&);
+    void attach_namespace(const uint32_t nsid);
 
-    NVMe* controller = nullptr;
     queue_ring subm;
     queue_ring comp;
-    std::map<queue_reference, async_result> async_results;
+    std::vector<namespace_t> ns;
+  private:
+    NVMe& m_dev;
+    uint16_t id_counter = 1;
   };
 
   void check_version();
+  void retrieve_information();
+  void setup_io_queues();
   void msix_aq_comp_handler();
   void msix_ioq_comp_handler();
 
@@ -124,7 +153,10 @@ private:
 
   uintptr_t m_ctl = 0;
   uint32_t  m_dbstride;
-  queue_t m_aq;
+  uint8_t   m_ioq_vector = 0;
+  queue_t   m_aq;
+  std::vector<queue_t> m_ioqs;
+  std::map<queue_reference, async_result> async_results;
 
   // stat counters
   uint32_t* m_errors   = nullptr;

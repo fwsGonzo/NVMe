@@ -35,14 +35,29 @@
 #define REG_COMPQ_HEAD  0x1000
 #define REG_SUBMQ_TAIL  0x1000
 
-#define NVME_CMD_CREATE_SQ     0x01
-#define NVME_CMD_GET_LOG_PAGE  0x02
-#define NVME_CMD_CREATE_CQ     0x05
-#define NVME_CMD_ABORT         0x08
-#define NVME_CMD_IDENTIFY      0x06
-#define NVME_CMD_SET_FEATURES  0x09
-#define NVME_CMD_GET_FEATURES  0x0A
-#define NVME_CMD_DEV_SELF_TEST 0x14
+enum {
+  NVME_CMD_CREATE_SQ     = 0x01,
+  NVME_CMD_GET_LOG_PAGE  = 0x02,
+  NVME_CMD_CREATE_CQ     = 0x05,
+  NVME_CMD_ABORT         = 0x08,
+  NVME_CMD_IDENTIFY      = 0x06,
+  NVME_CMD_SET_FEATURES  = 0x09,
+  NVME_CMD_GET_FEATURES  = 0x0A,
+  NVME_CMD_DEV_SELF_TEST = 0x14,
+
+  NVME_IO_FLUSH          = 0x0,
+  NVME_IO_WRITE          = 0x1,
+  NVME_IO_READ           = 0x2,
+  NVME_IO_WRITE_UNCOR    = 0x4,
+  NVME_IO_COMPARE        = 0x5,
+  NVME_IO_WRITE_ZEROES   = 0x8,
+
+  NVME_FEAT_NUM_QUEUES  = 0x07,
+  NVME_FEAT_IRQ_CONFIG  = 0x09,
+  
+  NVME_QUEUE_PHYS_CONTIG = (1 << 0),
+  NVME_CQ_IRQ_ENABLED    = (1 << 1)
+};
 
 #define SGL_TYPE_DEFAULT  0x0
 
@@ -56,10 +71,6 @@ struct sgl_data_block_desc
 
 struct nvme_io_subm_entry
 {
-  uint8_t  opcode  = 0;
-  uint8_t  options = 0; /* No FUSE, PRP */
-  uint16_t command = 0;
-  uint32_t nsid    = 0;
   uint64_t resv0   = 0;
   uint64_t MPTR = 0x0;
   uint64_t prp1 = 0x0;
@@ -71,31 +82,107 @@ struct nvme_io_subm_entry
   uint32_t dw14;
   uint32_t dw15;
 } __attribute__((packed));
-static_assert(sizeof(nvme_io_subm_entry) == 64, "I/O submission entry must be 64 bytes");
+static_assert(sizeof(nvme_io_subm_entry) == 56, "I/O subm entry must be 56 bytes");
+
+struct nvme_identify {
+	uint64_t  resv1[2];
+	uint64_t  prp1;
+	uint64_t  prp2;
+	int32_t   cns;
+	uint32_t  resv2[5];
+};
+static_assert(sizeof(nvme_identify) == 56, "Identify cmd must be 56 bytes");
+
+struct nvme_features {
+	uint64_t  resv1[2];
+	uint64_t  prp1;
+	uint64_t  prp2;
+	uint32_t  fid;
+	uint32_t  dw11;
+	uint32_t  resv2[4];
+};
+static_assert(sizeof(nvme_features) == 56, "Features cmd must be 56 bytes");
+
+struct nvme_create_cq {
+	uint32_t resv1[4];
+	uint64_t prp1;
+  uint64_t resv2;
+  uint16_t cq_id;
+  uint16_t cq_size;
+  uint16_t cq_flags;
+  uint16_t cq_vector;
+	uint32_t resv3[4];
+};
+
+struct nvme_create_sq {
+	uint32_t resv1[4];
+	uint64_t prp1;
+	uint64_t resv2;
+  uint16_t sq_id;
+  uint16_t sq_size;
+  uint16_t sq_flags;
+  uint16_t sq_cqid;
+	uint32_t resv3[4];
+};
+
+struct nvme_readwrite
+{
+	uint64_t  resv;
+	uint64_t  metadata;
+	uint64_t  prp1;
+	uint64_t  prp2;
+	uint64_t  slba;
+	uint16_t  length;
+	uint16_t  control;
+	uint32_t  dsmgmt;
+	uint32_t  reftag;
+	uint16_t  apptag;
+  uint16_t  appmask;
+};
+static_assert(sizeof(nvme_readwrite) == 56, "Read/write cmd must be 56 bytes");
+
+struct nvme_command
+{
+  uint8_t   opcode;
+	uint8_t   flags;
+	uint16_t	cmd_id;
+	uint32_t  nsid;
+  union {
+    nvme_io_subm_entry entry;
+    nvme_identify      ident;
+    nvme_features      features;
+    nvme_create_sq     create_sq;
+    nvme_create_cq     create_cq;
+    nvme_readwrite     rw;
+  };
+
+  nvme_command()
+  {
+    std::memset(this, 0, sizeof(nvme_command));
+  }
+};
+static_assert(sizeof(nvme_command) == 64, "NVMe command size must match its components");
 
 struct nvme_io_comp_entry
 {
-  uint32_t command;
+  uint32_t result;
   uint32_t resv;
   uint16_t sq_head;
   uint16_t sq_id;
-  uint32_t dw3;
+  uint16_t cmd_id;
+  int16_t  status;
 
-  uint16_t phase_tag() const noexcept {
-    return (dw3 >> 16) & 0x1;
+  int16_t phase_tag() const noexcept {
+    return status & 0x1;
   }
-  uint16_t status_field() const noexcept {
-    return dw3 >> 17;
+  int16_t error() const noexcept {
+    return (status >> 1) & 0x7FFF;
   }
-  uint16_t status_code() const noexcept {
-    return status_field() & 0xFF;
+  int error_code() const noexcept {
+    return error() & 0x3FFF;
   }
-  uint16_t cid() const noexcept {
-    return dw3 & 0xFFFF;
-  }
-
-  bool good() const noexcept {
-    return status_code() == 0;
+  int error_dnr() const noexcept {
+    return error() & 0x4000;
   }
 
 } __attribute__((packed));
@@ -113,6 +200,41 @@ struct identify_lba_format_data {
   uint8_t  LBADS;
   unsigned RP : 2;
   unsigned Reserved0 : 6;
+};
+
+struct identify_ctrl_data {
+  uint16_t vid;
+  uint16_t ssvid;
+  char     serial_number[20];
+  char     model_number[40];
+  char     firmware_rev[8];
+  uint8_t  rab;
+  uint8_t  ieee[3];
+  uint8_t  mic;
+  uint8_t  mdts;
+  uint16_t cntlid;
+  uint32_t ver;
+  uint32_t resv1[172];
+  uint16_t oacs;
+  uint8_t  acl;
+  uint8_t  aerl;
+  uint8_t  frmw;
+  uint8_t  lpa;
+  uint8_t  elpe;
+  uint8_t  npss;
+  uint8_t  avscc;
+  uint8_t  apsta;
+  uint16_t wstemp;
+  uint16_t cctemp;
+  uint8_t  resv2[242];
+  uint8_t  sqes;
+  uint8_t  cqes;
+  uint8_t  resv3[2];
+  uint32_t nn;
+  uint16_t oncs;
+  uint16_t fuses;
+  uint8_t  fna;
+  uint8_t  vwc;
 };
 
 struct identify_namespace_data {
