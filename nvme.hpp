@@ -76,9 +76,9 @@ private:
     uint32_t result = 0;
     bool good() const noexcept { return status == 0; }
   };
-  struct queue_t;
+  struct queue;
   struct namespace_t {
-    namespace_t(NVMe&, queue_t&, uint32_t nsid);
+    namespace_t(NVMe&, queue&, uint32_t nsid);
     uint32_t nsid() const noexcept { return m_nsid; }
     uint64_t block_size() const noexcept { return m_blk_size; }
     uint64_t blocks() const noexcept { return m_blocks; }
@@ -101,10 +101,10 @@ private:
     void comp_advance_head(NVMe& dev);
     void alloc(uint16_t, uint16_t size, size_t elem);
   };
-  struct queue_t
+  struct queue
   {
-    queue_t(NVMe& dev) : m_dev(dev) {}
-    queue_t(NVMe&, int no, uint16_t subm_size, uint16_t comp_size);
+    queue(NVMe& dev) : m_dev(dev) {}
+    queue(NVMe&, int no, uint16_t subm_size, uint16_t comp_size);
 
     sync_result identify(uint32_t nsid, uint32_t cns, void* dma_addr);
     sync_result set_features(uint32_t fid, uint32_t dw11, void* dma_addr);
@@ -142,9 +142,8 @@ private:
 
   uintptr_t m_ctl = 0;
   uint32_t  m_dbstride;
-  uint8_t   m_ioq_vector = 0;
-  queue_t   m_aq;
-  std::vector<queue_t> m_ioqs;
+  queue   m_aq;
+  std::vector<queue> m_ioqs;
   std::map<queue_reference, async_result> async_results;
 
   // stat counters

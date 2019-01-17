@@ -59,7 +59,6 @@ NVMe::NVMe(hw::PCI_Device& dev)
     dev.setup_msix_vector(SMP::cpu_id(), IRQ_BASE + acq);
     uint8_t iocq = Events::get().subscribe({this, &NVMe::msix_ioq_comp_handler});
     dev.setup_msix_vector(SMP::cpu_id(), IRQ_BASE + iocq);
-    this->m_ioq_vector = iocq;
   }
   else {
     assert(0 && "No intx support for NVMe");
@@ -81,7 +80,8 @@ NVMe::NVMe(hw::PCI_Device& dev)
       COMP_Q_SIZE << 16 |
       SUBM_Q_SIZE << 0  );
 
-  new (&m_aq) queue_t(*this, 0, SUBM_Q_SIZE, COMP_Q_SIZE);
+  // admin queue doesn't need to be bigger 2/2
+  new (&m_aq) queue(*this, 0, 2, 2);
   write64(REG_AQ_SUBM_BA, (uint64_t) m_aq.subm.m_data);
   write64(REG_AQ_COMP_BA, (uint64_t) m_aq.comp.m_data);
 
@@ -188,7 +188,7 @@ void NVMe::msix_ioq_comp_handler()
     cq.comp_advance_head(*this);
   }
 }
-void NVMe::queue_t::handle_result(nvme_io_comp_entry& entry)
+void NVMe::queue::handle_result(nvme_io_comp_entry& entry)
 {
   auto it = m_dev.async_results.find(comp_ref(entry));
   assert(it != m_dev.async_results.end());
@@ -253,13 +253,12 @@ bool NVMe::write_sync(block_t blk, buffer_t buffer)
   return !res.good();
 }
 
-
 void NVMe::deactivate()
 {
   /// TODO: reset device
 }
 
-void NVMe::queue_t::identify_namespaces()
+void NVMe::queue::identify_namespaces()
 {
   void* buffer = std::aligned_alloc(4096, 4096);
   // CNS 0x2 => Identify namespaces
@@ -274,13 +273,13 @@ void NVMe::queue_t::identify_namespaces()
   }
   std::free(buffer);
 }
-void NVMe::queue_t::attach_namespace(const uint32_t nsid)
+void NVMe::queue::attach_namespace(const uint32_t nsid)
 {
   INFO("NVMe", "Attaching namespace %#x", nsid);
   this->ns.emplace_back(m_dev, *this, nsid);
 }
 
-NVMe::namespace_t::namespace_t(NVMe& dev, queue_t& q, uint32_t nsid)
+NVMe::namespace_t::namespace_t(NVMe& dev, queue& q, uint32_t nsid)
   : m_dev(dev), m_nsid(nsid)
 {
   void* buffer = std::aligned_alloc(4096, 4096);
@@ -300,7 +299,7 @@ NVMe::namespace_t::namespace_t(NVMe& dev, queue_t& q, uint32_t nsid)
   std::free(buffer);
 }
 
-NVMe::queue_t::queue_t(NVMe& dev, const int qid,
+NVMe::queue::queue(NVMe& dev, const int qid,
     const uint16_t SUBM_SIZE, const uint16_t COMP_SIZE)
   : m_dev(dev)
 {
@@ -336,7 +335,7 @@ void NVMe::queue_ring::alloc(const uint16_t idx, const uint16_t size, const size
   this->size = size;
 }
 
-NVMe::sync_result NVMe::queue_t::identify(
+NVMe::sync_result NVMe::queue::identify(
       const uint32_t nsid, const uint32_t cns, void* dma_addr)
 {
   nvme_command cmd;
@@ -347,7 +346,7 @@ NVMe::sync_result NVMe::queue_t::identify(
   return this->submit_sync(cmd);
 }
 
-NVMe::sync_result NVMe::queue_t::set_features(
+NVMe::sync_result NVMe::queue::set_features(
       const uint32_t fid, const uint32_t dw11, void* dma_addr)
 {
   nvme_command cmd;
@@ -358,7 +357,7 @@ NVMe::sync_result NVMe::queue_t::set_features(
   return this->submit_sync(cmd);
 }
 
-NVMe::sync_result NVMe::queue_t::create_ioq(const uint32_t nsid)
+NVMe::sync_result NVMe::queue::create_ioq(const uint32_t nsid)
 {
   nvme_command cmd;
   cmd.opcode = NVME_CMD_CREATE_CQ;
@@ -369,7 +368,7 @@ NVMe::sync_result NVMe::queue_t::create_ioq(const uint32_t nsid)
   return this->submit_sync(cmd);
 }
 
-nvme_command NVMe::queue_t::read(uint32_t nsid, void* buffer, uint64_t lba, uint16_t blks)
+nvme_command NVMe::queue::read(uint32_t nsid, void* buffer, uint64_t lba, uint16_t blks)
 {
   nvme_command cmd;
   cmd.opcode = NVME_IO_READ;
@@ -379,7 +378,7 @@ nvme_command NVMe::queue_t::read(uint32_t nsid, void* buffer, uint64_t lba, uint
   cmd.rw.length = blks-1;
   return cmd;
 }
-nvme_command NVMe::queue_t::write(uint32_t nsid, void* buffer, uint64_t lba, uint16_t blks)
+nvme_command NVMe::queue::write(uint32_t nsid, void* buffer, uint64_t lba, uint16_t blks)
 {
   nvme_command cmd;
   cmd.opcode = NVME_IO_WRITE;
@@ -390,7 +389,7 @@ nvme_command NVMe::queue_t::write(uint32_t nsid, void* buffer, uint64_t lba, uin
   return cmd;
 }
 
-void NVMe::queue_t::submit_async(nvme_command& cmd, async_result async)
+void NVMe::queue::submit_async(nvme_command& cmd, async_result async)
 {
   m_dev.async_results.emplace(
       std::piecewise_construct,
@@ -403,7 +402,7 @@ void NVMe::queue_t::submit_async(nvme_command& cmd, async_result async)
   // submit command
   this->submit(cmd);
 }
-NVMe::sync_result NVMe::queue_t::submit_sync(nvme_command& cmd)
+NVMe::sync_result NVMe::queue::submit_sync(nvme_command& cmd)
 {
   // generate command id
   const uint16_t cid = id_counter++;
@@ -434,7 +433,7 @@ NVMe::sync_result NVMe::queue_t::submit_sync(nvme_command& cmd)
   // return result
   return result;
 }
-void NVMe::queue_t::submit(nvme_command& cmd)
+void NVMe::queue::submit(nvme_command& cmd)
 {
   auto& q = this->subm;
   // write entry to queue area
@@ -445,7 +444,7 @@ void NVMe::queue_t::submit(nvme_command& cmd)
   m_dev.write32(reg_doorbell_submq_tail(q.no, m_dev.m_dbstride), q.index);
 }
 
-NVMe::queue_reference NVMe::queue_t::self_reference() const noexcept
+NVMe::queue_reference NVMe::queue::self_reference() const noexcept
 {
   return (this->subm.no << 16) | this->id_counter;
 }
