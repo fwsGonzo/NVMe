@@ -28,7 +28,7 @@
 static const int SUBM_Q_SIZE = 16;
 static const int COMP_Q_SIZE = 16;
 
-NVMe::queue_reference comp_ref(nvme_io_comp_entry& entry) {
+static NVMe::queue_reference comp_ref(const nvme_io_comp_entry& entry) {
   return (entry.sq_id << 16) | entry.cmd_id;
 }
 
@@ -138,14 +138,13 @@ void NVMe::retrieve_information()
   INFO2("Version: %.*s", 8, ctrl->firmware_rev);
 
   std::free(buffer);
-  
   this->m_aq.identify_namespaces();
 }
 
 void NVMe::setup_io_queues()
 {
   const int qcount = 1;
-  uint32_t qdata = (qcount - 1) | ((qcount - 1) << 16);
+  const uint32_t qdata = (qcount - 1) | ((qcount - 1) << 16);
   auto res = this->m_aq.set_features(NVME_FEAT_NUM_QUEUES, qdata, nullptr);
   assert(res.good());
   // NOTE: res.result contains two DWs containing the final count
@@ -165,35 +164,51 @@ NVMe::block_t NVMe::size() const noexcept {
 void NVMe::msix_aq_comp_handler()
 {
   //printf("NVMe::msix_aq_comp_handler()\n");
+  this->handle_queue( this->m_aq );
 }
 void NVMe::msix_ioq_comp_handler()
 {
   //printf("NVMe::msix_ioq_comp_handler()\n");
-  auto& q = m_ioqs.at(0);
-  auto& cq = q.comp;
+  this->handle_queue( this->m_ioqs.at(0) );
+}
+void NVMe::handle_queue(queue& q)
+{
   while (true)
   {
-    auto& entry = cq.comp_entry();
-    if (entry.phase_tag() != cq.current_phase) break;
-    //printf("cmd id %#x status %#x   phase %#x\n",
-    //       entry.cmd_id, entry.error(), entry.phase_tag());
-    //printf("--> SQ ID %#x SQ HEAD %#x\n", entry.sq_id, entry.sq_head);
+    auto& entry = q.comp.comp_entry();
+    if (entry.phase_tag() != q.comp.current_phase) break;
+    printf("cmd id %#x status %#x   phase %#x\n",
+           entry.cmd_id, entry.error(), entry.phase_tag());
+    printf("--> SQ ID %#x SQ HEAD %#x\n", entry.sq_id, entry.sq_head);
     if (entry.error()) {
       printf("CQ %d error: %#x\n", entry.sq_id, entry.error_code());
     }
     assert(entry.error() == 0);
+    auto copy = entry;
+    // goto next item
+    q.comp_advance_head();
     // process item
-    q.handle_result(entry);
-
-    cq.comp_advance_head(*this);
+    q.handle_result(copy);
+  }
+  while (!q.full() && !q.writeq.empty())
+  {
+    auto item = std::move(q.writeq.front());
+    q.writeq.pop_front();
+    this->schedule(std::move(item));
   }
 }
-void NVMe::queue::handle_result(nvme_io_comp_entry& entry)
+void NVMe::queue::handle_result(const nvme_io_comp_entry& entry)
 {
-  auto it = m_dev.async_results.find(comp_ref(entry));
-  assert(it != m_dev.async_results.end());
-  auto result = std::move(it->second);
-  m_dev.async_results.erase(it);
+  printf("Entry: status %#x\n", entry.error());
+  printf("Him: %#x  Us1: %#x\n", comp_ref(entry), m_dev.async_results[0].uid);
+  printf("Him: %#x  Us2: %#x\n", comp_ref(entry), m_dev.async_results[1].uid);
+  printf("Him: %#x  Us3: %#x\n", comp_ref(entry), m_dev.async_results[2].uid);
+  printf("Him: %#x  Us4: %#x\n", comp_ref(entry), m_dev.async_results[3].uid);
+  
+  const queue_reference uid = comp_ref(entry);
+  assert(m_dev.async_results.front().uid == uid);
+  auto result = std::move(m_dev.async_results.front());
+  m_dev.async_results.pop_front();
 
   /* do something */
   switch (result.mode) {
@@ -208,49 +223,119 @@ void NVMe::queue::handle_result(nvme_io_comp_entry& entry)
   }
 }
 
-void NVMe::read(block_t blk, size_t cnt, on_read_func func)
+void NVMe::read(block_t blk, size_t cnt, on_read_func callback)
 {
-  async_result result {
+  const work_item item {
+    .blk  = blk,
+    .cnt  = cnt,
     .mode = MODE_READ,
+    .async = true,
     .buffer = fs::construct_buffer(block_size() * cnt),
-    .on_read = std::move(func)
+    .on_read = std::move(callback)
   };
-  auto& q = m_ioqs.at(0);
-  auto cmd = q.read(m_aq.ns.at(0).nsid(), result.buffer->data(), blk, cnt);
-  q.submit_async(cmd, std::move(result));
+  this->schedule(std::move(item));
 }
 NVMe::buffer_t NVMe::read_sync(block_t blk, size_t cnt)
 {
-  auto buffer = fs::construct_buffer(block_size() * cnt);
+  const work_item item {
+    .blk  = blk,
+    .cnt  = cnt,
+    .mode = MODE_READ,
+    .async = false,
+    .buffer = fs::construct_buffer(block_size() * cnt)
+  };
+  return this->begin_read(std::move(item));
+}
+
+NVMe::buffer_t NVMe::begin_read(work_item item)
+{
+  assert(item.mode == MODE_READ);
+  const uint32_t nsid = m_aq.ns.at(0).nsid();
   auto& q = m_ioqs.at(0);
-  auto cmd = q.read(m_aq.ns.at(0).nsid(), buffer->data(), blk, cnt);
-  
-  auto res = q.submit_sync(cmd);
-  if (res.good()) return buffer;
-  return nullptr;
+  auto cmd = q.read(nsid, item.buffer->data(), item.blk, item.cnt);
+  if (item.async)
+  {
+    async_result result {
+      .mode = MODE_READ,
+      .buffer = std::move(item.buffer),
+      .on_read = std::move(item.on_read)
+    };
+    q.submit_async(cmd, std::move(result));
+    return nullptr;
+  }
+  else
+  {
+    auto res = q.submit_sync(cmd);
+    if (res.good()) return item.buffer;
+    return nullptr;
+  }
 }
 
 void NVMe::write(block_t blk, buffer_t buffer, on_write_func callback)
 {
-  async_result result {
+  const work_item item {
+    .blk  = blk,
+    .cnt  = buffer->size() / block_size(),
     .mode = MODE_WRITE,
+    .async = true,
     .buffer = std::move(buffer),
     .on_write = std::move(callback)
   };
-  const size_t cnt = buffer->size() / block_size();
-  auto& q = m_ioqs.at(0);
-  auto cmd = q.write(m_aq.ns.at(0).nsid(), result.buffer->data(), blk, cnt);
-  
-  q.submit_async(cmd, std::move(result));
+  this->schedule(std::move(item));
 }
 bool NVMe::write_sync(block_t blk, buffer_t buffer)
 {
-  const size_t cnt = buffer->size() / block_size();
+  const work_item item {
+    .blk  = blk,
+    .cnt  = buffer->size() / block_size(),
+    .mode = MODE_WRITE,
+    .async = false,
+    .buffer = std::move(buffer)
+  };
+  return this->begin_write(std::move(item));
+}
+
+bool NVMe::begin_write(work_item item)
+{
+  // TODO: wait for enough room to submit
+  assert(item.mode == MODE_WRITE);
   auto& q = m_ioqs.at(0);
-  auto cmd = q.write(m_aq.ns.at(0).nsid(), buffer->data(), blk, cnt);
-  
-  auto res = q.submit_sync(cmd);
-  return !res.good();
+  auto cmd = q.write(m_aq.ns.at(0).nsid(),
+                     item.buffer->data(), item.blk, item.cnt);
+  if (item.async)
+  {
+    async_result result {
+      .mode = MODE_WRITE,
+      .buffer = std::move(item.buffer),
+      .on_write = std::move(item.on_write)
+    };
+    q.submit_async(cmd, std::move(result));
+    return true;
+  }
+  else
+  {
+    auto res = q.submit_sync(cmd);
+    return res.good();
+  }
+}
+
+void NVMe::schedule(work_item item)
+{
+  assert(item.async == true);
+  auto& q = m_ioqs.at(0);
+  if (q.full()) {
+    q.writeq.push_back(std::move(item));
+    printf("Queued up work item, size %zu\n", q.writeq.size());
+    return;
+  }
+  switch (item.mode) {
+    case MODE_READ:
+        this->begin_read(std::move(item));
+        break;
+    case MODE_WRITE:
+        this->begin_write(std::move(item));
+        break;
+  }
 }
 
 void NVMe::deactivate()
@@ -391,14 +476,13 @@ nvme_command NVMe::queue::write(uint32_t nsid, void* buffer, uint64_t lba, uint1
 
 void NVMe::queue::submit_async(nvme_command& cmd, async_result async)
 {
-  m_dev.async_results.emplace(
-      std::piecewise_construct,
-      std::forward_as_tuple(this->self_reference()),
-      std::forward_as_tuple(std::move(async))
-    );
+  const uint32_t uid = this->self_reference();
+  async.uid = uid;
+  m_dev.async_results.push_back(std::move(async));
   // generate command id
   const uint16_t cid = id_counter++;
   cmd.cmd_id = cid;
+  //printf("async uid: %#x  cid %#x\n", uid, cid);
   // submit command
   this->submit(cmd);
 }
@@ -423,13 +507,13 @@ NVMe::sync_result NVMe::queue::submit_sync(nvme_command& cmd)
   {
     printf("Error: %#x\n", entry.error_code());
     // increment head in the ring
-    comp.comp_advance_head(this->m_dev);
+    this->comp_advance_head();
     // return error
     return sync_result{-1, 0};
   }
   const sync_result result{0, entry.result};
   // increment head in the ring
-  comp.comp_advance_head(this->m_dev);
+  this->comp_advance_head();
   // return result
   return result;
 }
@@ -442,6 +526,8 @@ void NVMe::queue::submit(nvme_command& cmd)
   // update tail pointer
   q.index = (q.index + 1) % q.size;
   m_dev.write32(reg_doorbell_submq_tail(q.no, m_dev.m_dbstride), q.index);
+  assert(this->level < q.size);
+  this->level ++;
 }
 
 NVMe::queue_reference NVMe::queue::self_reference() const noexcept
@@ -458,7 +544,7 @@ nvme_io_comp_entry& NVMe::queue_ring::comp_entry() noexcept
 {
   return ((nvme_io_comp_entry*) this->m_data)[this->index];
 }
-void NVMe::queue_ring::comp_advance_head(NVMe& dev)
+void NVMe::queue_ring::advance_head(NVMe& dev) noexcept
 {
   this->index++;
   if (this->index == this->size) {
@@ -466,6 +552,12 @@ void NVMe::queue_ring::comp_advance_head(NVMe& dev)
     this->current_phase = 1 - this->current_phase;
   }
   dev.write32(reg_doorbell_compq_head(this->no, dev.m_dbstride), this->index);
+}
+void NVMe::queue::comp_advance_head() noexcept
+{
+  this->comp.advance_head(m_dev);
+  assert(this->level > 0);
+  this->level--;
 }
 
 uint32_t NVMe::read32(const uint32_t off) noexcept

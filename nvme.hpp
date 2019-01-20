@@ -23,7 +23,6 @@
 #include <hw/writable_blkdev.hpp>
 #include <hw/pci_device.hpp>
 #include <deque>
-#include <map>
 #include "nvme_regs.hpp"
 
 class NVMe : public hw::Writable_Block_device
@@ -52,7 +51,7 @@ public:
   buffer_t read_sync(block_t, size_t) override;
 
   // write starting at @blk from @buffer, call @callback when done
-  void write(block_t, buffer_t, on_write_func callback);
+  void write(block_t, buffer_t, on_write_func callback) override;
   bool write_sync(block_t, buffer_t) override;
 
   void deactivate() override;
@@ -64,11 +63,23 @@ private:
   enum {
     MODE_READ, MODE_WRITE
   };
-  struct async_result {
-    int      mode = MODE_WRITE;
-    buffer_t buffer;
+  struct work_item
+  {
     on_read_func  on_read  = nullptr;
     on_write_func on_write = nullptr;
+    buffer_t buffer = nullptr;
+    block_t  blk;
+    size_t   cnt;
+    int      mode = MODE_WRITE;
+    bool     async = false;
+  };
+  
+  struct async_result {
+    on_read_func  on_read  = nullptr;
+    on_write_func on_write = nullptr;
+    int      mode   = MODE_WRITE;
+    buffer_t buffer = nullptr;
+    queue_reference uid = 0;
   };
 
   struct sync_result {
@@ -98,13 +109,16 @@ private:
     
     nvme_command& command(uint16_t idx, const uint32_t stride);
     nvme_io_comp_entry& comp_entry() noexcept;
-    void comp_advance_head(NVMe& dev);
+    void advance_head(NVMe& dev) noexcept;
     void alloc(uint16_t, uint16_t size, size_t elem);
   };
   struct queue
   {
     queue(NVMe& dev) : m_dev(dev) {}
     queue(NVMe&, int no, uint16_t subm_size, uint16_t comp_size);
+
+    bool full() const noexcept { return level == comp.size; }
+    void comp_advance_head() noexcept;
 
     sync_result identify(uint32_t nsid, uint32_t cns, void* dma_addr);
     sync_result set_features(uint32_t fid, uint32_t dw11, void* dma_addr);
@@ -116,22 +130,29 @@ private:
     void        submit_async(nvme_command&, async_result);
     sync_result submit_sync(nvme_command&);
     queue_reference self_reference() const noexcept;
-    void handle_result(nvme_io_comp_entry&);
+    void handle_result(const nvme_io_comp_entry&);
     void attach_namespace(const uint32_t nsid);
 
     queue_ring subm;
     queue_ring comp;
     std::vector<namespace_t> ns;
+    std::deque<work_item> writeq;
   private:
     NVMe& m_dev;
     uint16_t id_counter = 1;
+    uint16_t level = 0;
   };
+
+  void schedule(work_item);
+  buffer_t begin_read(work_item);
+  bool     begin_write(work_item);
 
   void check_version();
   void retrieve_information();
   void setup_io_queues();
   void msix_aq_comp_handler();
   void msix_ioq_comp_handler();
+  void handle_queue(queue&);
 
   inline uint32_t read32(uint32_t off) noexcept;
   inline uint64_t read64(uint32_t off) noexcept;
@@ -144,7 +165,7 @@ private:
   uint32_t  m_dbstride;
   queue   m_aq;
   std::vector<queue> m_ioqs;
-  std::map<queue_reference, async_result> async_results;
+  std::deque<async_result> async_results;
 
   // stat counters
   uint32_t* m_errors   = nullptr;

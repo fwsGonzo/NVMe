@@ -34,7 +34,7 @@ void Service::start(const std::string&)
   // if the disk is empty, we can't mount a filesystem
   CHECKSERT(!disk->empty(), "Disk not empty");
   CHECKSERT(disk->dev().size() == 1, "Disk has 1 sector");
-  
+  /*
   INFO2("|-> Sync reads");
   int gucci = 0;
   for (int i = 0; i < 1000; i++) {
@@ -43,9 +43,11 @@ void Service::start(const std::string&)
     if (buffer->size() == device.block_size()) gucci ++;
   }
   CHECKSERT(gucci == 1000, "1000x read_sync() success");
+  */
   
+  static const int NUM_ASYNC  = 100;
   INFO2("|-> Async reads");
-  for (int i = 0; i < 32; i++)
+  for (int i = 0; i < NUM_ASYNC; i++)
   disk->dev().read(0,
     [&device] (auto buffer) {
       static int gucci = 0;
@@ -54,9 +56,9 @@ void Service::start(const std::string&)
       assert(buffer != nullptr);
       assert(buffer->size() == device.block_size());
 
-      if (gucci == 32)
+      if (gucci == NUM_ASYNC)
       {
-        INFO2("[x] 32x async read() success");
+        INFO2("[x] %dx async read() success", NUM_ASYNC);
         INFO2("SUCCESS");
         OS::shutdown();
       }
