@@ -110,7 +110,7 @@ NVMe::NVMe(hw::PCI_Device& dev)
   this->retrieve_information();
   assert(!this->m_aq.ns.empty() && "Must have at least one namespace");
   INFO("NVMe", "Block device with %zu sectors capacity", this->size());
-  
+
   this->setup_io_queues();
 }
 
@@ -149,7 +149,7 @@ void NVMe::setup_io_queues()
   assert(res.good());
   // NOTE: res.result contains two DWs containing the final count
   //printf("Done setting features\n");
-  
+
   m_ioqs.emplace_back(*this, 1, SUBM_Q_SIZE, COMP_Q_SIZE);
   //printf("Done creating I/O queue\n");
 }
@@ -204,7 +204,7 @@ void NVMe::queue::handle_result(const nvme_io_comp_entry& entry)
   printf("Him: %#x  Us2: %#x\n", comp_ref(entry), m_dev.async_results[1].uid);
   printf("Him: %#x  Us3: %#x\n", comp_ref(entry), m_dev.async_results[2].uid);
   printf("Him: %#x  Us4: %#x\n", comp_ref(entry), m_dev.async_results[3].uid);
-  
+
   const queue_reference uid = comp_ref(entry);
   assert(m_dev.async_results.front().uid == uid);
   auto result = std::move(m_dev.async_results.front());
@@ -372,7 +372,7 @@ NVMe::namespace_t::namespace_t(NVMe& dev, queue& q, uint32_t nsid)
   // CNS 0x0 => Identify namespace data
   auto res = q.identify(this->m_nsid, 0x0, buffer);
   assert(res.good());
-  
+
   auto* d = (identify_namespace_data*) buffer;
 
   const int lbaf_idx = d->FLBAS & 0xF;
@@ -581,9 +581,9 @@ void NVMe::write64(const uint32_t off, const uint64_t val) noexcept
   *(volatile uint64_t*) (this->m_ctl + off) = val;
 }
 
-#include <kernel/pci_manager.hpp>
+#include <hw/pci_manager.hpp>
 __attribute__((constructor))
 static void nvme_gconstr() {
   // QEMU NVM Express Controller
-  PCI_manager::register_blk(PCI::VENDOR_INTEL, 0x5845, &NVMe::new_instance);
+  hw::PCI_manager::register_blk(PCI::VENDOR_INTEL, 0x5845, &NVMe::new_instance);
 }

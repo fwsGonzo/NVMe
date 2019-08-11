@@ -21,13 +21,14 @@ static std::shared_ptr<fs::Disk> disk;
 
 static void test_filesystem();
 
-#include <kernel/pci_manager.hpp>
+#include <hw/pci_manager.hpp>
+#include <hal/machine.hpp>
 void Service::start(const std::string&)
 {
-  PCI_manager::init(1);
+  hw::PCI_manager::init_devices(1);
 
   // instantiate memdisk with FAT filesystem
-  auto& device = hw::Devices::drive(0);
+  auto& device = os::machine().get<hw::Block_device> (0);
   disk = std::make_shared<fs::Disk> (device);
   // assert that we have a disk
   CHECKSERT(disk, "Disk created");
@@ -44,7 +45,7 @@ void Service::start(const std::string&)
   }
   CHECKSERT(gucci == 1000, "1000x read_sync() success");
   */
-  
+
   static const int NUM_ASYNC  = 100;
   INFO2("|-> Async reads");
   for (int i = 0; i < NUM_ASYNC; i++)
@@ -60,7 +61,7 @@ void Service::start(const std::string&)
       {
         INFO2("[x] %dx async read() success", NUM_ASYNC);
         INFO2("SUCCESS");
-        OS::shutdown();
+        os::shutdown();
       }
     });
 }
@@ -87,7 +88,7 @@ static void test_filesystem()
   {
     if (err) {
       printf("Could not mount filesystem\n");
-      panic("init_fs() failed");
+      os::panic("init_fs() failed");
     }
     CHECKSERT (not err, "Was able to mount filesystem");
 
@@ -96,7 +97,7 @@ static void test_filesystem()
     [] (fs::error_t err, auto ents) {
       if (err) {
         printf("Could not list '/' directory\n");
-        panic("ls() failed");
+        os::panic("ls() failed");
       }
 
       // go through directory entries
@@ -116,7 +117,7 @@ static void test_filesystem()
             {
               if (err) {
                 printf("Failed to read %s!\n", e_name.c_str());
-                panic("read() failed");
+                os::panic("read() failed");
               }
 
               std::string contents((const char*) buffer->data(), buffer->size());
